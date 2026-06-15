@@ -1,0 +1,166 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  # zfscrypt's go.mod replaces github.com/go-encryptions/ccm with a
+  # local sibling (../ccm). Check the sibling out next to this repo so
+  # the replace directive resolves and CI stays self-contained.
+  CCM_REF: main
+  # Coverage gate (repo's actual level).
+  COVER_MIN: "83.3"
+
+jobs:
+  native:
+    name: native ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout zfscrypt
+        uses: actions/checkout@v4
+        with:
+          path: zfscrypt
+
+      - name: Checkout ccm sibling
+        uses: actions/checkout@v4
+        with:
+          repository: go-encryptions/ccm
+          ref: ${{ env.CCM_REF }}
+          path: ccm
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: Build
+        working-directory: zfscrypt
+        run: CGO_ENABLED=0 go build ./...
+
+      - name: Test (with coverage)
+        working-directory: zfscrypt
+        run: |
+          set -euo pipefail
+          CGO_ENABLED=0 go test -covermode=atomic -coverprofile=cover.out ./...
+          pct=$(go tool cover -func=cover.out | awk '/^total:/ {print substr($3, 1, length($3)-1)}')
+          echo "coverage: ${pct}%  (min ${COVER_MIN}%)"
+          awk -v p="$pct" -v m="$COVER_MIN" 'BEGIN { exit (p+0 >= m+0) ? 0 : 1 }' \
+            || { echo "coverage ${pct}% below ${COVER_MIN}%"; exit 1; }
+
+  emulated:
+    name: emulated ${{ matrix.arch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: riscv64
+            image: debian:trixie
+            qemu_cpu: "rv64,v=true,vlen=128"
+          - arch: loong64
+            image: ghcr.io/loong64/debian:trixie
+            qemu_cpu: "la464"
+          - arch: ppc64le
+            image: debian:trixie
+            qemu_cpu: "power9"
+          - arch: s390x
+            image: debian:trixie
+            qemu_cpu: "qemu"
+    steps:
+      - name: Checkout zfscrypt
+        uses: actions/checkout@v4
+        with:
+          path: zfscrypt
+
+      - name: Checkout ccm sibling
+        uses: actions/checkout@v4
+        with:
+          repository: go-encryptions/ccm
+          ref: ${{ env.CCM_REF }}
+          path: ccm
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: Register binfmt handlers
+        run: docker run --rm --privileged tonistiigi/binfmt --install all
+
+      - name: Cross-compile per-package test binaries
+        working-directory: zfscrypt
+        run: |
+          set -euo pipefail
+          mkdir -p testbins
+          for pkg in $(go list ./...); do
+            name=$(echo "$pkg" | tr '/' '_')
+            echo "compiling test binary for $pkg -> $name"
+            CGO_ENABLED=0 GOOS=linux GOARCH=${{ matrix.arch }} \
+              go test -c -cover -covermode=atomic -o "testbins/${name}.test" "$pkg" || {
+                # packages with no test files produce no binary; skip them.
+                echo "  (no test binary for $pkg, skipping)"
+              }
+          done
+          ls -l testbins
+
+      - name: Run test binaries under QEMU (${{ matrix.arch }})
+        working-directory: zfscrypt
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          bins=(testbins/*.test)
+          if [ ${#bins[@]} -eq 0 ]; then
+            echo "no test binaries to run"; exit 1
+          fi
+          covdir="$PWD/covdata"
+          mkdir -p "$covdir"
+          for bin in "${bins[@]}"; do
+            echo "::group::run $bin"
+            docker run --rm \
+              --platform linux/${{ matrix.arch }} \
+              -e QEMU_CPU='${{ matrix.qemu_cpu }}' \
+              -e GOCOVERDIR=/cov \
+              -v "$PWD/testbins:/testbins:ro" \
+              -v "$covdir:/cov" \
+              ${{ matrix.image }} \
+              "/testbins/$(basename "$bin")" -test.v -test.coverprofile=/cov/$(basename "$bin").cover
+            echo "::endgroup::"
+          done
+
+      - name: Aggregate coverage
+        working-directory: zfscrypt
+        run: |
+          set -euo pipefail
+          # Merge per-binary coverage profiles into one and gate.
+          first=1
+          : > merged.cover
+          for f in covdata/*.cover; do
+            [ -e "$f" ] || continue
+            if [ $first -eq 1 ]; then
+              cat "$f" > merged.cover
+              first=0
+            else
+              tail -n +2 "$f" >> merged.cover
+            fi
+          done
+          if [ $first -eq 1 ]; then
+            echo "no coverage profiles produced"; exit 1
+          fi
+          pct=$(go tool cover -func=merged.cover | awk '/^total:/ {print substr($3, 1, length($3)-1)}')
+          echo "coverage: ${pct}%  (min ${COVER_MIN}%)"
+          awk -v p="$pct" -v m="$COVER_MIN" 'BEGIN { exit (p+0 >= m+0) ? 0 : 1 }' \
+            || { echo "coverage ${pct}% below ${COVER_MIN}%"; exit 1; }
