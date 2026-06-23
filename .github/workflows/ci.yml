@@ -15,7 +15,7 @@ env:
   # the replace directive resolves and CI stays self-contained.
   CCM_REF: main
   # Coverage gate (repo's actual level).
-  COVER_MIN: "83.3"
+  COVER_MIN: "95.0"
 
 jobs:
   native:

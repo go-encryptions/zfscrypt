@@ -113,11 +113,20 @@ const (
 	// regardless of the dataset's data-encryption suite. OpenZFS
 	// hardcodes this to 32 bytes (AES-256 always wraps the MEK).
 	WrappingKeyLen = 32
-	// WrappedKeySize is the size of the unwrap input: a 32-byte
-	// master encryption key concatenated with a 32-byte HMAC key
-	// (used by the pool to authenticate metadata that bypasses
-	// the AEAD layer, e.g. zfs send -w streams).
-	WrappedKeySize = 64
+	// MasterKeyLen is MASTER_KEY_MAX_LEN in OpenZFS.
+	MasterKeyLen = 32
+	// HMACKeyLen is SHA512_HMAC_KEYLEN in OpenZFS — the wrapped HMAC
+	// key is a full 64-byte HMAC-SHA512 key, NOT 32 bytes.
+	HMACKeyLen = 64
+	// WrappedKeySize is the size of the unwrap ciphertext input: the
+	// master encryption key concatenated with the HMAC key.
+	//
+	// CONFIRMED against OpenZFS (zfs-2.2.x): module/zfs/dsl_crypt.c
+	// dsl_crypto_key_open() reads MASTER_KEY (32) + HMAC_KEY (64), and
+	// zio_crypt_key_unwrap() decrypts the two concatenated as a single
+	// AEAD ciphertext (96 bytes), validated end-to-end against a real
+	// aes-256-gcm pool.
+	WrappedKeySize = MasterKeyLen + HMACKeyLen
 )
 
 // DeriveWrappingKey derives the dataset's wrapping key from the
@@ -141,15 +150,17 @@ func DeriveWrappingKey(passphrase, salt []byte, iters int) ([]byte, error) {
 //
 // suite chooses the AEAD: CCM or GCM. iv is the 12-byte field
 // stored in the DSL_CRYPTO_KEY object; mac is the matching 16-byte
-// authentication tag; wrapped is the 64-byte ciphertext.
+// authentication tag; wrapped is the WrappedKeySize (96) byte
+// ciphertext (32-byte master key || 64-byte HMAC key).
 //
 // ad is the additional authenticated data the pool computed at
-// wrap time (typically the DSL_CRYPTO_KEY object's
-// fingerprint — guid, crypt_algorithm, etc.). The caller must pass
-// the same bytes the pool used; passing the wrong AD shows up as
-// a tag-verification failure rather than as decryption garbage.
+// wrap time. OpenZFS zio_crypt_key_unwrap() uses LE64(guid) for
+// version-0 keys, and LE64(guid)||LE64(crypt)||LE64(version) for
+// the current version. The caller must pass the same bytes the
+// pool used; passing the wrong AD shows up as a tag-verification
+// failure rather than as decryption garbage.
 //
-// Returns the 32-byte MEK and the 32-byte HMAC key on success.
+// Returns the 32-byte MEK and the 64-byte HMAC key on success.
 func Unwrap(suite Suite, wrappingKey, iv, mac, wrapped, ad []byte) (mek, hmacKey []byte, err error) {
 	if len(wrappingKey) != WrappingKeyLen {
 		return nil, nil, fmt.Errorf("zfscrypt: wrapping key must be %d bytes, got %d", WrappingKeyLen, len(wrappingKey))
@@ -168,16 +179,34 @@ func Unwrap(suite Suite, wrappingKey, iv, mac, wrapped, ad []byte) (mek, hmacKey
 	if err != nil {
 		return nil, nil, fmt.Errorf("zfscrypt: unwrap: %w", err)
 	}
-	return pt[:32], pt[32:], nil
+	return pt[:MasterKeyLen], pt[MasterKeyLen:], nil
 }
 
-// DeriveBlockKey derives the per-block data-encryption key from
-// the dataset's MEK via HKDF-SHA512. The `salt` field comes from
-// the encrypted block's BP_CRYPT salt (a per-block randomiser);
-// `info` is the algorithm-name context binding (currently the
-// suite's String() form, as the OpenZFS code does).
+// DeriveBlockKey derives the per-block data-encryption key from the
+// dataset's master encryption key via HKDF-SHA512.
 //
-// Output length matches the suite's data-key length (16/24/32).
+// CONFIRMED against OpenZFS (zfs-2.2.x): module/os/*/zfs/zio_crypt.c
+// zio_do_crypt_data() derives the per-block key with
+//
+//	hkdf_sha512(master, keylen, /*salt*/ NULL, 0,
+//	            /*info*/ blk_salt, ZIO_DATA_SALT_LEN, out, keylen)
+//
+// where hkdf_sha512's prototype is
+//
+//	hkdf_sha512(key_material, km_len, salt, salt_len, info, info_len, out, out_len)
+//
+// — i.e. the HKDF *salt* is EMPTY and the per-block 8-byte salt is the
+// HKDF *info*. (This is the opposite of the intuitive "salt is the
+// salt" mapping; an earlier version of this function used the block
+// salt as the HKDF salt and the suite name as info, which produced a
+// key that did NOT decrypt real on-disk blocks.) Validated end-to-end
+// against a real aes-256-gcm pool: the key produced here, with the
+// block IV/MAC from the blkptr, decrypts on-disk ciphertext and the
+// GCM tag verifies.
+//
+// The `salt` argument is the encrypted block's BP_CRYPT salt
+// (ZIO_DATA_SALT_LEN = 8 bytes). Output length matches the suite's
+// data-key length (16/24/32).
 func DeriveBlockKey(suite Suite, mek, salt []byte) ([]byte, error) {
 	if len(mek) != 32 {
 		return nil, fmt.Errorf("zfscrypt: mek must be 32 bytes, got %d", len(mek))
@@ -186,7 +215,8 @@ func DeriveBlockKey(suite Suite, mek, salt []byte) ([]byte, error) {
 	if klen == 0 {
 		return nil, fmt.Errorf("zfscrypt: unknown suite %s", suite)
 	}
-	return hkdf.Key(sha512.New, mek, salt, suite.String(), klen)
+	// HKDF salt = empty; HKDF info = the per-block salt bytes.
+	return hkdf.Key(sha512.New, mek, nil, string(salt), klen)
 }
 
 // DecryptBlock authenticates and decrypts one encrypted ZFS block
