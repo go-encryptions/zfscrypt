@@ -31,19 +31,19 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout zfscrypt
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: zfscrypt
 
       - name: Checkout ccm sibling
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: go-encryptions/ccm
           ref: ${{ env.CCM_REF }}
           path: ccm
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: stable
 
@@ -82,19 +82,19 @@ jobs:
             qemu_cpu: "qemu"
     steps:
       - name: Checkout zfscrypt
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: zfscrypt
 
       - name: Checkout ccm sibling
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: go-encryptions/ccm
           ref: ${{ env.CCM_REF }}
           path: ccm
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: stable
 
