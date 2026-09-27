@@ -1,6 +1,2 @@
-github.com/go-encryptions/ccm v0.0.0-20260620055113-74db323be0b2 h1:Gky3CPkbtx6TdLJKw/liSsljOz561HDE0gGXoABDObI=
-github.com/go-encryptions/ccm v0.0.0-20260620055113-74db323be0b2/go.mod h1:0XHNptBliXAeC9Ikl/maTnmj6+VWeJ5vZElyTprdYWI=
-github.com/go-encryptions/ccm v0.0.0-20260806072937-9e4d464681aa h1:9j0Kriv7YtTrInG17SdDcoCJVl/8cOqhlMlwRBEbDuc=
-github.com/go-encryptions/ccm v0.0.0-20260806072937-9e4d464681aa/go.mod h1:mdMMBlXE6sF9mCc1ryuifermVqwjHIOJPW0ZYVbYMMo=
-github.com/go-encryptions/ccm v0.0.0-20260830123323-fb71f1f65191 h1:5ub97Vgp8tnc6k5hFUM3qAZ3o8QbC8HIPaQn32dABIM=
-github.com/go-encryptions/ccm v0.0.0-20260830123323-fb71f1f65191/go.mod h1:mdMMBlXE6sF9mCc1ryuifermVqwjHIOJPW0ZYVbYMMo=
+github.com/go-encryptions/ccm v0.0.0-20260927083542-1713f748107c h1:0f8ZiVPXxyHgusuL+1gntuusu5Z9inR35TR5tkrB/IA=
+github.com/go-encryptions/ccm v0.0.0-20260927083542-1713f748107c/go.mod h1:mdMMBlXE6sF9mCc1ryuifermVqwjHIOJPW0ZYVbYMMo=
