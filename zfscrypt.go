@@ -29,7 +29,7 @@
 // Key derivation:
 //
 //	wrapping key  = PBKDF2-HMAC-SHA1(passphrase, salt, iters, 32)
-//	per-block key = HKDF-SHA512(mek, salt=blockSalt, info=algName, 32)
+//	per-block key = HKDF-SHA512(mek, salt=empty, info=blockSalt, KeyLen)
 package zfscrypt
 
 import (
@@ -42,15 +42,42 @@ import (
 	"crypto/sha512"
 	"errors"
 	"fmt"
-	"hash"
 
 	"github.com/go-encryptions/ccm"
 )
 
 // Suite enumerates the encryption algorithms OpenZFS supports for
-// dataset-level encryption. Values match the on-disk
-// `crypt_algorithm` field of a DSL_CRYPTO_KEY object.
+// dataset-level encryption.
+//
+// The numbers are this package's own compact numbering, NOT the on-disk
+// value: OpenZFS stores a zio_crypt_type_t (include/sys/fs/zfs.h), where
+// 1 is "on" and 2 is "off", so aes-128-ccm is 3 and aes-256-gcm is 8.
+// Convert with SuiteFromZioCrypt and ZioCrypt; both are checked against
+// pools written by OpenZFS (see testdata/openzfs.json).
 type Suite uint8
+
+// ZioCrypt returns the on-disk zio_crypt_type_t (the DSL_CRYPTO_SUITE
+// value) for the suite, or 0 (ZIO_CRYPT_INHERIT) for a value that is not
+// one of the six supported suites.
+func (s Suite) ZioCrypt() uint64 {
+	if s.KeyLen() == 0 {
+		return 0
+	}
+	return uint64(s) + zioCryptOffset
+}
+
+// SuiteFromZioCrypt maps an on-disk zio_crypt_type_t to a Suite. ok is
+// false for inherit, on, off (which name no algorithm by themselves) and
+// anything out of range.
+func SuiteFromZioCrypt(v uint64) (s Suite, ok bool) {
+	if v < zioCryptOffset+uint64(AES128CCM) || v > zioCryptOffset+uint64(AES256GCM) {
+		return SuiteInherit, false
+	}
+	return Suite(v - zioCryptOffset), true
+}
+
+// zioCryptOffset is ZIO_CRYPT_AES_128_CCM (3) minus AES128CCM (1).
+const zioCryptOffset = 2
 
 const (
 	SuiteInherit  Suite = 0 // dataset inherits from parent (not used at the crypto layer)
@@ -111,21 +138,18 @@ const (
 	MACSize = 16
 	// WrappingKeyLen is the length of the user-derived wrapping key
 	// regardless of the dataset's data-encryption suite. OpenZFS
-	// hardcodes this to 32 bytes (AES-256 always wraps the MEK).
+	// derives 32 bytes (WRAPPING_KEY_LEN); the AEAD that wraps the MEK
+	// then wraps the MEK with all of it, for every suite (see Unwrap).
 	WrappingKeyLen = 32
 	// MasterKeyLen is MASTER_KEY_MAX_LEN in OpenZFS.
 	MasterKeyLen = 32
 	// HMACKeyLen is SHA512_HMAC_KEYLEN in OpenZFS — the wrapped HMAC
 	// key is a full 64-byte HMAC-SHA512 key, NOT 32 bytes.
 	HMACKeyLen = 64
-	// WrappedKeySize is the size of the unwrap ciphertext input: the
-	// master encryption key concatenated with the HMAC key.
-	//
-	// CONFIRMED against OpenZFS (zfs-2.2.x): module/zfs/dsl_crypt.c
-	// dsl_crypto_key_open() reads MASTER_KEY (32) + HMAC_KEY (64), and
-	// zio_crypt_key_unwrap() decrypts the two concatenated as a single
-	// AEAD ciphertext (96 bytes), validated end-to-end against a real
-	// aes-256-gcm pool.
+	// WrappedKeySize is the size of the unwrap ciphertext input for the
+	// 256-bit suites: master key (32) || HMAC key (64), decrypted as a
+	// single AEAD ciphertext. The 128- and 192-bit suites carry a shorter
+	// master key; see Suite.WrappedKeyLen.
 	WrappedKeySize = MasterKeyLen + HMACKeyLen
 )
 
@@ -145,13 +169,44 @@ func DeriveWrappingKey(passphrase, salt []byte, iters int) ([]byte, error) {
 	return pbkdf2.Key(sha1.New, string(passphrase), salt, iters, WrappingKeyLen)
 }
 
+// WrappedKeyLen is the length of the wrapped (MEK || HMAC key) ciphertext
+// for the suite: KeyLen bytes of master key plus HMACKeyLen of HMAC key
+// (96 for the 256-bit suites, 88 for 192, 80 for 128), or 0 for an
+// unsupported suite.
+func (s Suite) WrappedKeyLen() int {
+	if s.KeyLen() == 0 {
+		return 0
+	}
+	return s.KeyLen() + HMACKeyLen
+}
+
+// JoinWrappedKey builds the Unwrap input from the two byte arrays OpenZFS
+// keeps in the DSL crypto key ZAP (DSL_CRYPTO_MASTER_KEY_1, always 32 bytes,
+// and DSL_CRYPTO_HMAC_KEY_1, 64 bytes). For the 128- and 192-bit suites only
+// the first KeyLen bytes of the master array are the wrapped key. The rest is
+// padding whose content OpenZFS does not define (dsl_crypt.c leaves the
+// buffer uninitialised, so it may be leftover stack), and is ignored.
+func JoinWrappedKey(suite Suite, masterKey, hmacKey []byte) ([]byte, error) {
+	if suite.KeyLen() == 0 {
+		return nil, fmt.Errorf("zfscrypt: unsupported suite %s", suite)
+	}
+	if len(masterKey) != MasterKeyLen || len(hmacKey) != HMACKeyLen {
+		return nil, fmt.Errorf("zfscrypt: master key must be %d bytes and HMAC key %d, got %d and %d",
+			MasterKeyLen, HMACKeyLen, len(masterKey), len(hmacKey))
+	}
+	out := make([]byte, 0, suite.WrappedKeyLen())
+	out = append(out, masterKey[:suite.KeyLen()]...)
+	return append(out, hmacKey...), nil
+}
+
 // Unwrap decrypts a wrapped (MEK || HMAC key) blob using the
 // dataset's wrapping key.
 //
 // suite chooses the AEAD: CCM or GCM. iv is the 12-byte field
 // stored in the DSL_CRYPTO_KEY object; mac is the matching 16-byte
-// authentication tag; wrapped is the WrappedKeySize (96) byte
-// ciphertext (32-byte master key || 64-byte HMAC key).
+// authentication tag; wrapped is the suite.WrappedKeyLen() byte
+// ciphertext (master key of suite.KeyLen() bytes || 64-byte HMAC key);
+// JoinWrappedKey builds it from the on-disk ZAP values.
 //
 // ad is the additional authenticated data the pool computed at
 // wrap time. OpenZFS zio_crypt_key_unwrap() uses LE64(guid) for
@@ -160,7 +215,8 @@ func DeriveWrappingKey(passphrase, salt []byte, iters int) ([]byte, error) {
 // pool used; passing the wrong AD shows up as a tag-verification
 // failure rather than as decryption garbage.
 //
-// Returns the 32-byte MEK and the 64-byte HMAC key on success.
+// Returns the MEK (suite.KeyLen() bytes: 16, 24 or 32, as OpenZFS keeps
+// it) and the 64-byte HMAC key on success.
 func Unwrap(suite Suite, wrappingKey, iv, mac, wrapped, ad []byte) (mek, hmacKey []byte, err error) {
 	if len(wrappingKey) != WrappingKeyLen {
 		return nil, nil, fmt.Errorf("zfscrypt: wrapping key must be %d bytes, got %d", WrappingKeyLen, len(wrappingKey))
@@ -171,21 +227,26 @@ func Unwrap(suite Suite, wrappingKey, iv, mac, wrapped, ad []byte) (mek, hmacKey
 	if len(mac) != MACSize {
 		return nil, nil, fmt.Errorf("zfscrypt: mac must be %d bytes, got %d", MACSize, len(mac))
 	}
-	if len(wrapped) != WrappedKeySize {
-		return nil, nil, fmt.Errorf("zfscrypt: wrapped blob must be %d bytes, got %d", WrappedKeySize, len(wrapped))
+	if suite.KeyLen() == 0 {
+		return nil, nil, fmt.Errorf("zfscrypt: unwrap: unsupported suite %s", suite)
+	}
+	if want := suite.WrappedKeyLen(); len(wrapped) != want {
+		return nil, nil, fmt.Errorf("zfscrypt: wrapped blob for %s must be %d bytes, got %d", suite, want, len(wrapped))
 	}
 
+	// The wrapping key is the full 32 bytes for every suite, so the 128-
+	// and 192-bit suites wrap with AES-256 (verified against OpenZFS).
 	pt, err := decryptAEAD(suite, wrappingKey, iv, mac, wrapped, ad)
 	if err != nil {
 		return nil, nil, fmt.Errorf("zfscrypt: unwrap: %w", err)
 	}
-	return pt[:MasterKeyLen], pt[MasterKeyLen:], nil
+	return pt[:suite.KeyLen()], pt[suite.KeyLen():], nil
 }
 
 // DeriveBlockKey derives the per-block data-encryption key from the
 // dataset's master encryption key via HKDF-SHA512.
 //
-// CONFIRMED against OpenZFS (zfs-2.2.x): module/os/*/zfs/zio_crypt.c
+// CONFIRMED against OpenZFS (zfs-2.2.x sources; judged on kmod 2.3.4): module/os/*/zfs/zio_crypt.c
 // zio_do_crypt_data() derives the per-block key with
 //
 //	hkdf_sha512(master, keylen, /*salt*/ NULL, 0,
@@ -208,12 +269,12 @@ func Unwrap(suite Suite, wrappingKey, iv, mac, wrapped, ad []byte) (mek, hmacKey
 // (ZIO_DATA_SALT_LEN = 8 bytes). Output length matches the suite's
 // data-key length (16/24/32).
 func DeriveBlockKey(suite Suite, mek, salt []byte) ([]byte, error) {
-	if len(mek) != 32 {
-		return nil, fmt.Errorf("zfscrypt: mek must be 32 bytes, got %d", len(mek))
-	}
 	klen := suite.KeyLen()
 	if klen == 0 {
 		return nil, fmt.Errorf("zfscrypt: unknown suite %s", suite)
+	}
+	if len(mek) != klen {
+		return nil, fmt.Errorf("zfscrypt: mek for %s must be %d bytes, got %d", suite, klen, len(mek))
 	}
 	// HKDF salt = empty; HKDF info = the per-block salt bytes.
 	return hkdf.Key(sha512.New, mek, nil, string(salt), klen)
@@ -242,7 +303,7 @@ func DecryptBlock(suite Suite, key, iv, mac, ciphertext, ad []byte) ([]byte, err
 }
 
 // HMAC returns HMAC-SHA512-256 over data using the dataset's HMAC
-// key (the 32-byte sibling of the MEK obtained from Unwrap).
+// key (the 64-byte sibling of the MEK obtained from Unwrap).
 // OpenZFS uses this to authenticate metadata that does not pass
 // through the AEAD layer — most notably the per-block "salt"
 // field. The truncation to 32 bytes matches OpenZFS's choice.
@@ -256,16 +317,21 @@ func HMAC(hmacKey, data []byte) []byte {
 // decryptAEAD is the inner helper: build the right AEAD instance
 // for `suite`, then Open(ciphertext || mac) with the given AD.
 func decryptAEAD(suite Suite, key, iv, mac, ciphertext, ad []byte) ([]byte, error) {
-	block, err := aes.NewCipher(key)
+	// An unknown suite must not fall through to GCM: Unwrap(0, ...) or
+	// Unwrap(99, ...) would otherwise "succeed" as AES-GCM.
+	if suite.KeyLen() == 0 {
+		return nil, fmt.Errorf("unsupported suite %s", suite)
+	}
+	block, err := newBlock(key)
 	if err != nil {
 		return nil, fmt.Errorf("aes.NewCipher: %w", err)
 	}
 
 	var aead cipher.AEAD
 	if suite.IsCCM() {
-		aead, err = ccm.NewCCM(block, MACSize, IVSize)
+		aead, err = newCCM(block, MACSize, IVSize)
 	} else {
-		aead, err = cipher.NewGCMWithNonceSize(block, IVSize)
+		aead, err = newGCM(block, IVSize)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("AEAD ctor (%s): %w", suite, err)
@@ -281,6 +347,11 @@ func decryptAEAD(suite Suite, key, iv, mac, ciphertext, ad []byte) ([]byte, erro
 	return aead.Open(nil, iv, buf, ad)
 }
 
-// guard against unused-import warnings if a future refactor
-// drops one of the hash imports.
-var _ hash.Hash = sha512.New()
+// The AEAD constructors, as variables only so a test can prove that a
+// constructor failure is reported and not swallowed. With the constant
+// 12-byte nonce and 16-byte tag used here neither can fail.
+var (
+	newBlock = aes.NewCipher
+	newCCM   = ccm.NewCCM
+	newGCM   = cipher.NewGCMWithNonceSize
+)
