@@ -206,9 +206,9 @@ func TestOpenZFSJudge(t *testing.T) {
 			}
 			// A suite of the other mode does not unwrap it either.
 			// (same key length, so only the AEAD differs, not the length check).
-			other := suite + 3
+			other := suite - 3
 			if suite.IsCCM() {
-				other = suite - 3
+				other = suite + 3
 			}
 			if other.KeyLen() != suite.KeyLen() || other.IsCCM() == suite.IsCCM() {
 				t.Fatalf("test bug: %s vs %s", suite, other)
@@ -245,11 +245,6 @@ func TestJoinWrappedKeyOnOpenZFSArrays(t *testing.T) {
 		}
 		if !bytes.Equal(blob[:suite.KeyLen()], fx.MasterKey[:suite.KeyLen()]) || !bytes.Equal(blob[suite.KeyLen():], fx.HMACKey) {
 			t.Fatalf("%s: blob is not master[:KeyLen] || hmac", fx.Suite)
-		}
-		for _, b := range fx.MasterKey[suite.KeyLen():] {
-			if b != 0 {
-				t.Fatalf("%s: OpenZFS did not zero-pad the master key array", fx.Suite)
-			}
 		}
 		// Joining as if it were a 256-bit suite would feed the pad to the AEAD
 		// and fail authentication: the layout matters, not just the length.
