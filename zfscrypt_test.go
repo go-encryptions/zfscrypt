@@ -91,7 +91,7 @@ func TestDeriveWrappingKey(t *testing.T) {
 
 func TestUnwrapRoundTrip(t *testing.T) {
 	// Cover both CCM and GCM, and both 128 and 256 bit suites.
-	cases := []Suite{AES128CCM, AES256CCM, AES128GCM, AES256GCM}
+	cases := []Suite{AES128CCM, AES192CCM, AES256CCM, AES128GCM, AES192GCM, AES256GCM}
 
 	for _, suite := range cases {
 		t.Run(suite.String(), func(t *testing.T) {
@@ -100,7 +100,7 @@ func TestUnwrapRoundTrip(t *testing.T) {
 			// 96-byte (32-byte MEK || 64-byte HMAC key) plaintext to
 			// produce ciphertext + tag; then Unwrap with those inputs.
 			wkey := makePattern(WrappingKeyLen, 0x10)
-			mek := makePattern(MasterKeyLen, 0xa0)
+			mek := makePattern(suite.KeyLen(), 0xa0)
 			hkey := makePattern(HMACKeyLen, 0xb0)
 			iv := makePattern(IVSize, 0x40)
 			ad := []byte("dsl_crypto_key bonus fingerprint")
@@ -115,8 +115,8 @@ func TestUnwrapRoundTrip(t *testing.T) {
 			sealed := aead.Seal(nil, iv, pt, ad)
 
 			// Split into ciphertext || mac as ZFS stores them.
-			ct := sealed[:WrappedKeySize]
-			mac := sealed[WrappedKeySize:]
+			ct := sealed[:suite.WrappedKeyLen()]
+			mac := sealed[suite.WrappedKeyLen():]
 
 			gotMek, gotHkey, err := Unwrap(suite, wkey, iv, mac, ct, ad)
 			if err != nil {
@@ -171,14 +171,21 @@ func TestDeriveBlockKey(t *testing.T) {
 	if got := len(kCCM); got != 32 {
 		t.Errorf("AES256 block key len = %d, want 32", got)
 	}
-	k128, _ := DeriveBlockKey(AES128CCM, mek, []byte("salt"))
-	if got := len(k128); got != 16 {
-		t.Errorf("AES128 block key len = %d, want 16", got)
+	k128, err := DeriveBlockKey(AES128CCM, mek[:16], []byte("salt"))
+	if err != nil || len(k128) != 16 {
+		t.Errorf("AES128 block key len = %d (err %v), want 16", len(k128), err)
 	}
 
-	// MEK length is validated.
+	// The MEK must be exactly the suite's key size: a 32-byte MEK is
+	// refused for a 128-bit suite, a 16-byte one for a 256-bit suite.
 	if _, err := DeriveBlockKey(AES256CCM, []byte("short"), nil); err == nil {
 		t.Errorf("DeriveBlockKey accepted a short MEK")
+	}
+	if _, err := DeriveBlockKey(AES128GCM, mek, nil); err == nil {
+		t.Errorf("DeriveBlockKey accepted a 32-byte MEK for a 128-bit suite")
+	}
+	if _, err := DeriveBlockKey(AES256GCM, mek[:16], nil); err == nil {
+		t.Errorf("DeriveBlockKey accepted a 16-byte MEK for a 256-bit suite")
 	}
 
 	// Unknown suite is rejected.
