@@ -29,7 +29,7 @@
 // Key derivation:
 //
 //	wrapping key  = PBKDF2-HMAC-SHA1(passphrase, salt, iters, 32)
-//	per-block key = HKDF-SHA512(mek, salt=blockSalt, info=algName, 32)
+//	per-block key = HKDF-SHA512(mek, salt=empty, info=blockSalt, KeyLen)
 package zfscrypt
 
 import (
@@ -139,7 +139,7 @@ const (
 	// WrappingKeyLen is the length of the user-derived wrapping key
 	// regardless of the dataset's data-encryption suite. OpenZFS
 	// derives 32 bytes (WRAPPING_KEY_LEN); the AEAD that wraps the MEK
-	// then uses the first KeyLen bytes of it (see Unwrap).
+	// then wraps the MEK with all of it, for every suite (see Unwrap).
 	WrappingKeyLen = 32
 	// MasterKeyLen is MASTER_KEY_MAX_LEN in OpenZFS.
 	MasterKeyLen = 32
@@ -183,8 +183,9 @@ func (s Suite) WrappedKeyLen() int {
 // JoinWrappedKey builds the Unwrap input from the two byte arrays OpenZFS
 // keeps in the DSL crypto key ZAP (DSL_CRYPTO_MASTER_KEY_1, always 32 bytes,
 // and DSL_CRYPTO_HMAC_KEY_1, 64 bytes). For the 128- and 192-bit suites only
-// the first KeyLen bytes of the master array are the wrapped key; OpenZFS
-// zero-pads the rest, and a non-zero pad is refused.
+// the first KeyLen bytes of the master array are the wrapped key. The rest is
+// padding whose content OpenZFS does not define (dsl_crypt.c leaves the
+// buffer uninitialised, so it may be leftover stack), and is ignored.
 func JoinWrappedKey(suite Suite, masterKey, hmacKey []byte) ([]byte, error) {
 	if suite.KeyLen() == 0 {
 		return nil, fmt.Errorf("zfscrypt: unsupported suite %s", suite)
@@ -192,11 +193,6 @@ func JoinWrappedKey(suite Suite, masterKey, hmacKey []byte) ([]byte, error) {
 	if len(masterKey) != MasterKeyLen || len(hmacKey) != HMACKeyLen {
 		return nil, fmt.Errorf("zfscrypt: master key must be %d bytes and HMAC key %d, got %d and %d",
 			MasterKeyLen, HMACKeyLen, len(masterKey), len(hmacKey))
-	}
-	for _, b := range masterKey[suite.KeyLen():] {
-		if b != 0 {
-			return nil, fmt.Errorf("zfscrypt: master key padding beyond %d bytes is not zero", suite.KeyLen())
-		}
 	}
 	out := make([]byte, 0, suite.WrappedKeyLen())
 	out = append(out, masterKey[:suite.KeyLen()]...)
@@ -250,7 +246,7 @@ func Unwrap(suite Suite, wrappingKey, iv, mac, wrapped, ad []byte) (mek, hmacKey
 // DeriveBlockKey derives the per-block data-encryption key from the
 // dataset's master encryption key via HKDF-SHA512.
 //
-// CONFIRMED against OpenZFS (zfs-2.2.x): module/os/*/zfs/zio_crypt.c
+// CONFIRMED against OpenZFS (zfs-2.2.x sources; judged on kmod 2.3.4): module/os/*/zfs/zio_crypt.c
 // zio_do_crypt_data() derives the per-block key with
 //
 //	hkdf_sha512(master, keylen, /*salt*/ NULL, 0,

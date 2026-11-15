@@ -34,7 +34,7 @@ wk, _ := zfscrypt.DeriveWrappingKey(passphrase, salt, iters)
 
 // 2. unwrap the master encryption key (MEK) + HMAC key from the DSL_CRYPTO_KEY.
 //    JoinWrappedKey builds the blob from the DSL_CRYPTO_MASTER_KEY_1 (32 bytes,
-//    zero-padded for the 128/192-bit suites) and DSL_CRYPTO_HMAC_KEY_1 arrays;
+//    only the first KeyLen bytes count for the 128/192-bit suites) and DSL_CRYPTO_HMAC_KEY_1 arrays;
 //    ad = LE64(guid) || LE64(DSL_CRYPTO_SUITE) || LE64(version).
 wrapped, _ := zfscrypt.JoinWrappedKey(suite, masterKeyArray, hmacKeyArray)
 mek, hmacKey, err := zfscrypt.Unwrap(suite, wk, iv, mac, wrapped, ad)

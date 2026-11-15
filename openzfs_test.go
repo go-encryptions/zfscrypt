@@ -205,21 +205,31 @@ func TestOpenZFSJudge(t *testing.T) {
 				t.Error("Unwrap accepted a wrong passphrase")
 			}
 			// A suite of the other mode does not unwrap it either.
-			other := AES256CCM
+			// (same key length, so only the AEAD differs, not the length check).
+			other := suite + 3
 			if suite.IsCCM() {
-				other = AES256GCM
+				other = suite - 3
+			}
+			if other.KeyLen() != suite.KeyLen() || other.IsCCM() == suite.IsCCM() {
+				t.Fatalf("test bug: %s vs %s", suite, other)
 			}
 			if _, _, err := Unwrap(other, wk, fx.IV, fx.MAC, wrappedBlob(fx), unwrapAD(fx)); err == nil {
 				t.Error("Unwrap accepted the key under the other AEAD mode")
+			}
+			// The AD binds the on-disk crypt value too.
+			badCrypt := unwrapAD(fx)
+			badCrypt[8] ^= 1
+			if _, _, err := Unwrap(suite, wk, fx.IV, fx.MAC, wrappedBlob(fx), badCrypt); err == nil {
+				t.Error("Unwrap accepted a wrong crypt value in the AD")
 			}
 		})
 	}
 }
 
 // For the 128- and 192-bit suites OpenZFS keeps a master key of only KeyLen
-// bytes (the ZAP array is zero-padded to 32) and still wraps it with the full
-// 32-byte wrapping key. The judge's blobs prove both; the padding must be
-// zero for JoinWrappedKey to accept it.
+// bytes (the ZAP array is padded to 32 with undefined content) and still wraps
+// it with the full 32-byte wrapping key. The judge's blobs prove both; the
+// padding is ignored by JoinWrappedKey.
 func TestJoinWrappedKeyOnOpenZFSArrays(t *testing.T) {
 	for _, fx := range loadJudge(t).Fixtures {
 		suite := suiteByName[fx.Suite]
@@ -265,13 +275,17 @@ func TestJoinWrappedKeyRejects(t *testing.T) {
 	if _, err := JoinWrappedKey(AES128GCM, m, h[:63]); err == nil {
 		t.Error("short HMAC array accepted")
 	}
-	m[20] = 1
-	if _, err := JoinWrappedKey(AES128GCM, m, h); err == nil {
-		t.Error("non-zero padding accepted for a 128-bit suite")
+	// Padding content is undefined in OpenZFS: it must not change the blob
+	// for a 128-bit suite, and is key material for a 256-bit one.
+	a, _ := JoinWrappedKey(AES128GCM, m, h)
+	m[20] = 0xEE
+	b, err := JoinWrappedKey(AES128GCM, m, h)
+	if err != nil || !bytes.Equal(a, b) {
+		t.Errorf("padding changed the 128-bit blob (err %v)", err)
 	}
-	// the same byte is key material for a 256-bit suite.
-	if _, err := JoinWrappedKey(AES256GCM, m, h); err != nil {
-		t.Errorf("256-bit suite has no padding: %v", err)
+	c, err := JoinWrappedKey(AES256GCM, m, h)
+	if err != nil || c[20] != 0xEE {
+		t.Errorf("256-bit suite lost byte 20: %v", err)
 	}
 	if AES192CCM.WrappedKeyLen() != 88 || AES128GCM.WrappedKeyLen() != 80 || AES256CCM.WrappedKeyLen() != WrappedKeySize || SuiteInherit.WrappedKeyLen() != 0 {
 		t.Error("WrappedKeyLen wrong")
