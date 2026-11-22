@@ -181,9 +181,6 @@ var ErrLimit = kdfbudget.ErrLimit
 // PBKDF2 run (one SHA-1 output block) is charged to b before it starts; a
 // nil or zero Budget refuses.
 func DeriveWrappingKeyBudget(passphrase, salt []byte, iters int, b *kdfbudget.Budget) ([]byte, error) {
-	if iters <= 0 {
-		return nil, errors.New("zfscrypt: iters must be positive")
-	}
 	if err := chargeIters(b, iters); err != nil {
 		return nil, err
 	}
