@@ -42,6 +42,7 @@ import (
 	"crypto/sha512"
 	"errors"
 	"fmt"
+	"hash"
 
 	"github.com/go-encryptions/ccm"
 	"github.com/go-encryptions/kdfbudget"
@@ -184,8 +185,12 @@ func DeriveWrappingKeyBudget(passphrase, salt []byte, iters int, b *kdfbudget.Bu
 	if err := chargeIters(b, iters); err != nil {
 		return nil, err
 	}
-	return pbkdf2.Key(sha1.New, string(passphrase), salt, iters, WrappingKeyLen)
+	return pbkdf2Key(sha1.New, string(passphrase), salt, iters, WrappingKeyLen)
 }
+
+// pbkdf2Key is crypto/pbkdf2.Key; a variable only so a test can prove a
+// refused derivation never reaches it.
+var pbkdf2Key = pbkdf2.Key[hash.Hash]
 
 // chargeIters charges one SHA-1 PBKDF2 output block of iters iterations to b.
 // iters is checked positive first, so the uint64 conversion cannot wrap.

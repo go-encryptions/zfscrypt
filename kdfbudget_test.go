@@ -2,6 +2,7 @@ package zfscrypt
 
 import (
 	"errors"
+	"hash"
 	"strconv"
 	"testing"
 
@@ -14,6 +15,12 @@ func TestDeriveWrappingKeyRefusesHugeIters(t *testing.T) {
 	if strconv.IntSize < 64 {
 		t.Skip("1<<62 does not fit an int")
 	}
+	orig := pbkdf2Key
+	pbkdf2Key = func(func() hash.Hash, string, []byte, int, int) ([]byte, error) {
+		t.Fatal("a refused derivation reached PBKDF2")
+		return nil, nil
+	}
+	t.Cleanup(func() { pbkdf2Key = orig })
 	b := kdfbudget.Default()
 	_, err := DeriveWrappingKeyBudget([]byte("p"), make([]byte, 8), 1<<62, b)
 	if !errors.Is(err, ErrLimit) {
