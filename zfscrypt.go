@@ -44,6 +44,7 @@ import (
 	"fmt"
 
 	"github.com/go-encryptions/ccm"
+	"github.com/go-encryptions/kdfbudget"
 )
 
 // Suite enumerates the encryption algorithms OpenZFS supports for
@@ -161,12 +162,41 @@ const (
 // iters must match the value stored in the DSL_CRYPTO_KEY's
 // `iters` field. Salt is the 8-byte field stored next to it.
 //
+// iters comes from an untrusted dataset header: the work is charged to a
+// kdfbudget.Default budget first, so an absurd count is refused with
+// ErrLimit before any hashing. OpenZFS has no upper bound; the default
+// budget accepts every count up to 2^31. Use DeriveWrappingKeyBudget to
+// choose the budget (kdfbudget.Unlimited for a trusted header).
+//
 // Output: WrappingKeyLen (32) bytes.
 func DeriveWrappingKey(passphrase, salt []byte, iters int) ([]byte, error) {
+	return DeriveWrappingKeyBudget(passphrase, salt, iters, kdfbudget.Default())
+}
+
+// ErrLimit is returned when the key derivation asks for more work than the
+// budget allows. It is kdfbudget.ErrLimit.
+var ErrLimit = kdfbudget.ErrLimit
+
+// DeriveWrappingKeyBudget is DeriveWrappingKey with the caller's budget. The
+// PBKDF2 run (one SHA-1 output block) is charged to b before it starts; a
+// nil or zero Budget refuses.
+func DeriveWrappingKeyBudget(passphrase, salt []byte, iters int, b *kdfbudget.Budget) ([]byte, error) {
 	if iters <= 0 {
 		return nil, errors.New("zfscrypt: iters must be positive")
 	}
+	if err := chargeIters(b, iters); err != nil {
+		return nil, err
+	}
 	return pbkdf2.Key(sha1.New, string(passphrase), salt, iters, WrappingKeyLen)
+}
+
+// chargeIters charges one SHA-1 PBKDF2 output block of iters iterations to b.
+// iters is checked positive first, so the uint64 conversion cannot wrap.
+func chargeIters(b *kdfbudget.Budget, iters int) error {
+	if iters <= 0 {
+		return errors.New("zfscrypt: iters must be positive")
+	}
+	return b.ChargePBKDF2(kdfbudget.CostSHA1, uint64(iters))
 }
 
 // WrappedKeyLen is the length of the wrapped (MEK || HMAC key) ciphertext

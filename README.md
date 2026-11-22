@@ -65,6 +65,7 @@ plain, err := zfscrypt.DecryptBlock(suite, blockKey, blockIV, blockMAC, cipherte
 ## Security notes
 
 - **SHA-1 in `DeriveWrappingKey`** is *mandated by the OpenZFS 0.8 user-key format* (PBKDF2-HMAC-SHA1) — it is not a strength choice and must not be changed, or existing datasets become undecryptable. Documented inline.
+- **The iteration count is untrusted.** `pbkdf2iters` comes from the dataset header and OpenZFS enforces a minimum (100000) but no maximum, so a hostile header could ask for 2^62 iterations. `DeriveWrappingKey` charges the work to a [`kdfbudget`](https://github.com/go-encryptions/kdfbudget) default budget before hashing and returns `ErrLimit` (`errors.Is`) when it does not fit; every count up to 2^31 is accepted. `DeriveWrappingKeyBudget(passphrase, salt, iters, b)` takes your own `*kdfbudget.Budget` (`kdfbudget.Unlimited()` for a header you trust); a nil budget refuses.
 - All AEAD operations go through authenticated `Open()`; key material is sliced out only after the tag verifies.
 - Length parameters are validated before use; no `unsafe`, no cgo.
 
