@@ -44,6 +44,21 @@ func TestChargeItersAccepts(t *testing.T) {
 	}
 }
 
+// A non-positive count is refused as such, not charged: a negative int would
+// wrap to a huge uint64 and be reported as a budget overrun.
+func TestChargeItersNonPositive(t *testing.T) {
+	for _, iters := range []int{0, -1} {
+		b := kdfbudget.Default()
+		err := chargeIters(b, iters)
+		if err == nil || errors.Is(err, ErrLimit) {
+			t.Errorf("iters %d: got %v, want the positive-iters error", iters, err)
+		}
+		if b.Spent() != 0 {
+			t.Errorf("iters %d spent %d units", iters, b.Spent())
+		}
+	}
+}
+
 func TestDeriveWrappingKeyBudgetNilRefuses(t *testing.T) {
 	if _, err := DeriveWrappingKeyBudget([]byte("p"), make([]byte, 8), 1000, nil); err == nil {
 		t.Fatal("a nil budget must refuse")
