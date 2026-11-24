@@ -3,6 +3,6 @@ module github.com/go-encryptions/zfscrypt
 go 1.27.1
 
 require (
-	github.com/go-encryptions/ccm v0.1.1
-	github.com/go-encryptions/kdfbudget v0.1.0
+	github.com/go-encryptions/ccm v0.1.2
+	github.com/go-encryptions/kdfbudget v0.1.1
 )
